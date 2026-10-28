@@ -1,5 +1,6 @@
 import ipaddress
 import os
+import random
 import socket
 import threading
 import pygame
@@ -18,6 +19,113 @@ ESCURO = (15, 56, 15)
 MEDIO = (48, 98, 48)
 CLARO = (139, 172, 15)
 FUNDO = (155, 188, 15)
+
+#Formatos das pecas
+S = [['.....',
+      '.....',
+      '..00.',
+      '.00..',
+      '.....'],
+     ['.....',
+      '..0..',
+      '..00.',
+      '...0.',
+      '.....']]
+
+Z = [['.....',
+      '.....',
+      '.00..',
+      '..00.',
+      '.....'],
+     ['.....',
+      '..0..',
+      '.00..',
+      '.0...',
+      '.....']]
+
+I = [['.....',
+      '..0..',
+      '..0..',
+      '..0..',
+      '..0..'],
+     ['.....',
+      '0000.',
+      '.....',
+      '.....',
+      '.....']]
+
+O = [['.....',
+      '.....',
+      '.00..',
+      '.00..',
+      '.....']]
+
+J = [['.....',
+      '.0...',
+      '.000.',
+      '.....',
+      '.....'],
+     ['.....',
+      '..00.',
+      '..0..',
+      '..0..',
+      '.....'],
+     ['.....',
+      '.....',
+      '.000.',
+      '...0.',
+      '.....'],
+     ['.....',
+      '..0..',
+      '..0..',
+      '.00..',
+      '.....']]
+
+L = [['.....',
+      '...0.',
+      '.000.',
+      '.....',
+      '.....'],
+     ['.....',
+      '..0..',
+      '..0..',
+      '..00.',
+      '.....'],
+     ['.....',
+      '.....',
+      '.000.',
+      '.0...',
+      '.....'],
+     ['.....',
+      '.00..',
+      '..0..',
+      '..0..',
+      '.....']]
+
+T = [['.....',
+      '..0..',
+      '.000.',
+      '.....',
+      '.....'],
+     ['.....',
+      '..0..',
+      '..00.',
+      '..0..',
+      '.....'],
+     ['.....',
+      '.....',
+      '.000.',
+      '..0..',
+      '.....'],
+     ['.....',
+      '..0..',
+      '.00..',
+      '..0..',
+      '.....']]
+
+# index represents the shape
+shapes = [S, Z, I, O, J, L, T]
+CORES_PECAS = [MEDIO, ESCURO, CLARO, MEDIO, ESCURO, CLARO, MEDIO]  # cor de cada formato, na mesma ordem
 
 
 # função que usa a fonte pixelada se o arquivo estiver na pasta, senão usa a padrão do pygame
@@ -103,6 +211,14 @@ class CampoTexto:
             x = self.rect.x + 4 + img.get_width()
             pygame.draw.rect(tela, ESCURO, (x, self.rect.y + 3, 7, 7))
 
+class Peca(object):
+    def __init__(self, x, y, shape):
+        self.x = x
+        self.y = y
+        self.shape = shape
+        self.rotation = 0
+        self.cor = CORES_PECAS[shapes.index(shape)]
+
 
 # escreve um texto na tela, por padrão centralizado no ponto pos
 def escrever(texto, cor, pos, centralizado=True):
@@ -178,6 +294,56 @@ conectando = False
 status = "ENTER: CONECTAR"  # mensagem que aparece na tela do ip
 
 
+def convert_shape_format(piece):
+    positions = []
+    shape_format = piece.shape[piece.rotation % len(piece.shape)]
+
+    for i, line in enumerate(shape_format):
+        row = list(line)
+        for j, column in enumerate(row):
+            if column == '0':
+                positions.append((piece.x + j, piece.y + i))
+
+    for i, pos in enumerate(positions):
+        positions[i] = (pos[0] - 2, pos[1] -4)
+    return positions
+
+# a peça pode ficar ali? acima do tabuleiro (y < 0) pode, desde que não saia pelos lados
+def valid_space(piece, grid):
+    for x, y in convert_shape_format(piece):
+        if x < 0 or x >= COLUNAS or y >= LINHAS:
+            return False
+        if y >= 0 and grid[y][x] is not None:
+            return False
+    return True
+
+
+# monta a grade 10x20: None é vazio, senão guarda a cor do bloco fixado
+def criar_grade(travadas):
+    grade = [[None for _ in range(COLUNAS)] for _ in range(LINHAS)]
+    for (x, y), cor in travadas.items():
+        grade[y][x] = cor
+    return grade
+
+
+# apaga as linhas cheias e desce o que estava em cima, retorna quantas apagou
+def limpar_linhas(grade, travadas):
+    cheias = [y for y in range(LINHAS) if None not in grade[y]]
+    if not cheias:
+        return 0
+
+    novas = {}
+    for (x, y), cor in travadas.items():
+        if y in cheias:
+            continue
+        desce = sum(1 for c in cheias if c > y)  # quantas linhas cheias tinha embaixo dele
+        novas[(x, y + desce)] = cor
+    travadas.clear()
+    travadas.update(novas)
+    return len(cheias)
+
+
+
 # roda numa thread separada, assim a janela não trava enquanto espera o servidor
 def conectar(ip):
     global conexao, conectando, status
@@ -211,7 +377,8 @@ efeito_lcd = criar_efeito_lcd()
 def escolher(opcao):
     global estado, rodando, status
     if opcao == "JOGAR":
-        estado = "ip"
+        estado = "jogo"
+        iniciar_jogo()
         campo.ativo = True
         status = "ENTER: CONECTAR"
     elif opcao == "SAIR":
@@ -311,17 +478,132 @@ def desenha_ip():
 # jogo
 
 TABULEIRO = pygame.Rect(8, 0, COLUNAS * TAM_BLOCO, LINHAS * TAM_BLOCO)  # área onde as peças caem
+PONTOS_LINHAS = [0, 40, 100, 300, 1200]  # pontos por apagar 1, 2, 3 ou 4 linhas de uma vez
+
+gerador = random.Random()  # sorteia as peças; com a mesma seed os dois jogadores recebem a mesma sequência
+travadas = {}              # (x, y) -> cor dos blocos já fixados
+grade = criar_grade(travadas)
+peca_atual = None
+proxima_peca = None
+pontos = 0
+linhas_feitas = 0
+tempo_jogo = 0.0           # segundos desde o início da partida
+timer_queda = 0.0          # tempo acumulado desde a última vez que a peça desceu
+fim_de_jogo = False
+
+
+def nova_peca():
+    return Peca(5, 2, gerador.choice(shapes))
+
+
+# zera tudo pra começar uma partida; a seed vai vir do servidor (START:seed)
+def iniciar_jogo(seed=None):
+    global grade, peca_atual, proxima_peca, pontos, linhas_feitas, tempo_jogo, timer_queda, fim_de_jogo
+    gerador.seed(seed)
+    travadas.clear()
+    grade = criar_grade(travadas)
+    peca_atual = nova_peca()
+    proxima_peca = nova_peca()
+    pontos = 0
+    linhas_feitas = 0
+    tempo_jogo = 0.0
+    timer_queda = 0.0
+    fim_de_jogo = False
+
+
+def nivel():
+    return linhas_feitas // 10
+
+
+# segundos entre cada descida automática, fica mais rápido a cada nível
+def intervalo_queda():
+    return max(0.1, 0.8 - nivel() * 0.07)
+
+
+# tenta mover a peça; se não couber, desfaz e retorna False
+def mover(dx, dy, giro=0):
+    peca_atual.x += dx
+    peca_atual.y += dy
+    peca_atual.rotation += giro
+    if valid_space(peca_atual, grade):
+        return True
+    peca_atual.x -= dx
+    peca_atual.y -= dy
+    peca_atual.rotation -= giro
+    return False
+
+
+# fixa a peça no tabuleiro, apaga linhas e puxa a próxima
+def travar_peca():
+    global grade, peca_atual, proxima_peca, pontos, linhas_feitas, fim_de_jogo
+    for x, y in convert_shape_format(peca_atual):
+        if y < 0:  # travou com pedaço pra fora do topo
+            fim_de_jogo = True
+        else:
+            travadas[(x, y)] = peca_atual.cor
+    grade = criar_grade(travadas)
+
+    apagadas = limpar_linhas(grade, travadas)
+    if apagadas:
+        pontos += PONTOS_LINHAS[apagadas] * (nivel() + 1)
+        linhas_feitas += apagadas
+        grade = criar_grade(travadas)
+
+    peca_atual, proxima_peca = proxima_peca, nova_peca()
+    if not valid_space(peca_atual, grade):  # não tem espaço nem pra nascer
+        fim_de_jogo = True
 
 
 def eventos_jogo(evento):
-    global estado
-    if evento.type == pygame.KEYDOWN and evento.key == pygame.K_ESCAPE:
+    global estado, timer_queda
+    if evento.type != pygame.KEYDOWN:
+        return
+    if evento.key == pygame.K_ESCAPE:
         estado = "menu"
-    # aqui vão os controles: mover, girar e hard drop
+    elif fim_de_jogo:
+        if evento.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+            iniciar_jogo()
+    elif evento.key in (pygame.K_LEFT, pygame.K_a):
+        mover(-1, 0)
+    elif evento.key in (pygame.K_RIGHT, pygame.K_d):
+        mover(1, 0)
+    elif evento.key in (pygame.K_UP, pygame.K_w):
+        mover(0, 0, giro=1)
+    elif evento.key in (pygame.K_DOWN, pygame.K_s):  # soft drop
+        if not mover(0, 1):
+            travar_peca()
+        timer_queda = 0
+    elif evento.key == pygame.K_SPACE:  # hard drop: desce até encostar e já trava
+        while mover(0, 1):
+            pass
+        travar_peca()
+        timer_queda = 0
 
 
 def atualizar_jogo(dt):
-    pass  # aqui vai a lógica: queda da peça, colisão, limpar linhas
+    global tempo_jogo, timer_queda
+    if fim_de_jogo:
+        return
+    tempo_jogo += dt
+    timer_queda += dt
+    if timer_queda >= intervalo_queda():
+        timer_queda = 0
+        if not mover(0, 1):
+            travar_peca()
+
+
+# desenha a próxima peça centralizada dentro da caixa
+def desenhar_proxima(rect, tam=6):
+    formato = proxima_peca.shape[0]
+    blocos = [(j, i) for i, linha in enumerate(formato) for j, c in enumerate(linha) if c == '0']
+    min_x = min(j for j, _ in blocos)
+    min_y = min(i for _, i in blocos)
+    largura = (max(j for j, _ in blocos) - min_x + 1) * tam
+    altura = (max(i for _, i in blocos) - min_y + 1) * tam
+    x0 = rect.centerx - largura // 2
+    y0 = rect.centery - altura // 2
+    for j, i in blocos:
+        desenhar_bloco(x0 + (j - min_x) * tam, y0 + (i - min_y) * tam, proxima_peca.cor, tam)
 
 
 def desenhar_jogo():
@@ -335,23 +617,35 @@ def desenhar_jogo():
     for x in range(TABULEIRO.left, TABULEIRO.right, TAM_BLOCO):
         desenhar_tijolo(x, TABULEIRO.bottom)
 
-    # texto provisório até o jogo ficar pronto
-    escrever("SEU", MEDIO, (TABULEIRO.centerx, 70))
-    escrever("TETRIS", MEDIO, (TABULEIRO.centerx, 80))
-    escrever("AQUI", MEDIO, (TABULEIRO.centerx, 90))
+    # blocos fixados e a peça caindo (só a parte que já entrou no tabuleiro)
+    for (x, y), cor in travadas.items():
+        desenhar_bloco(TABULEIRO.x + x * TAM_BLOCO, TABULEIRO.y + y * TAM_BLOCO, cor)
+    for x, y in convert_shape_format(peca_atual):
+        if y >= 0:
+            desenhar_bloco(TABULEIRO.x + x * TAM_BLOCO, TABULEIRO.y + y * TAM_BLOCO, peca_atual.cor)
 
     # painel do lado direito
     centro = (TABULEIRO.right + 8 + LARGURA) // 2
     desenhar_moldura(pygame.Rect(97, 4, 62, 26), dupla=False)
     escrever("PONTOS", ESCURO, (centro, 12))
-    escrever("0", ESCURO, (centro, 22))
+    escrever(str(pontos), ESCURO, (centro, 22))
     desenhar_moldura(pygame.Rect(97, 36, 62, 44), dupla=False)
     escrever("PROXIMA", ESCURO, (centro, 44))
+    desenhar_proxima(pygame.Rect(97, 50, 62, 28))
     desenhar_moldura(pygame.Rect(97, 86, 62, 26), dupla=False)
-    escrever("NIVEL", ESCURO, (centro, 94))
-    escrever("1", ESCURO, (centro, 104))
+    escrever("TEMPO", ESCURO, (centro, 94))
+    minutos, segundos = divmod(int(tempo_jogo), 60)
+    escrever(f"{minutos}:{segundos:02}", ESCURO, (centro, 104))
+    escrever(f"NIVEL {nivel() + 1}", ESCURO, (centro, 124))
     escrever("ESC", ESCURO, (centro, 146))
     escrever("MENU", ESCURO, (centro, 156))
+
+    if fim_de_jogo:
+        desenhar_moldura(pygame.Rect(TABULEIRO.x + 4, 56, TABULEIRO.width - 8, 48))
+        escrever("FIM DE", ESCURO, (TABULEIRO.centerx, 68))
+        escrever("JOGO", ESCURO, (TABULEIRO.centerx, 78))
+        if int(tempo * 2) % 2 == 0:
+            escrever("ENTER", MEDIO, (TABULEIRO.centerx, 92))
 
 
 # loop principal: a cada frame trata os eventos, atualiza e desenha a tela atual
@@ -372,9 +666,9 @@ while rodando:
 
     if estado == "menu":
         desenhar_menu()
-    elif estado == "ip":
-        atualizar_ip()
-        desenha_ip()
+    # elif estado == "ip":
+    #     atualizar_ip()
+    #     desenha_ip()
     elif estado == "jogo":
         atualizar_jogo(dt)
         desenhar_jogo()
