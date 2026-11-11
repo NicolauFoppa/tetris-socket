@@ -666,9 +666,9 @@ while rodando:
 
     if estado == "menu":
         desenhar_menu()
-    # elif estado == "ip":
-    #     atualizar_ip()
-    #     desenha_ip()
+    elif estado == "ip":
+        atualizar_ip()
+        desenha_ip()
     elif estado == "jogo":
         atualizar_jogo(dt)
         desenhar_jogo()

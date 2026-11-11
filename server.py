@@ -8,44 +8,40 @@ PORTA = 13001
 clientes = []
 lock = threading.Lock()
 
-def tratar_cliente(conexao, endereco, id_jogador):
-    """
-    Thread responsável por ouvir um cliente específico e 
-    retransmitir suas mensagens para o oponente.
-    """
-    print(f"[CONECTADO] Jogador {id_jogador} vindo de {endereco}")
+def broadcast(mensagem, remetente=None):
+    # envia a mensagem para todos os clientes (ou só para o oponente se remetente for informado).
+    with lock:
+        para_remover = []
+        for c in clientes:
+            if c != remetente:
+                try:
+                    c.sendall(f"{mensagem}\n".encode('utf-8'))
+                except OSError:
+                    para_remover.append(c)
+        for c in para_remover:
+            if c in clientes:
+                clientes.remove(c)
+                c.close()
 
+def tratar_cliente(conexao, endereco, id_jogador):
+    # thread dedicada a cada cliente para escutar mensagens e repassar
+    print(f"[CONECTADO] Jogador {id_jogador} vindo de {endereco}")
+    buffer = ""
     try:
-        buffer = ""
         while True:
             dados = conexao.recv(1024).decode('utf-8')
             if not dados:
                 break
-            
             buffer += dados
             while "\n" in buffer:
                 mensagem, buffer = buffer.split("\n", 1)
                 mensagem = mensagem.strip()
-
                 if not mensagem:
                     continue
 
                 print(f"[JOGADOR {id_jogador}]: {mensagem}")
-
-                # identifica quem é o oponente
-                oponente = None
-                with lock:
-                    for c in clientes:
-                        if c != conexao:
-                            oponente = c
-                            break
-
-                # retransmite a mensagem para o oponente
-                if oponente:
-                    try:
-                        oponente.sendall(f"{mensagem}\n".encode('utf-8'))
-                    except OSError:
-                        pass
+                # retransmite dados da partida para o oponente
+                broadcast(mensagem, remetente=conexao)
 
     except (ConnectionResetError, OSError):
         pass
@@ -55,61 +51,52 @@ def tratar_cliente(conexao, endereco, id_jogador):
             if conexao in clientes:
                 clientes.remove(conexao)
         conexao.close()
-
+        broadcast("OPONENTE_SAIU")
 
 def iniciar_servidor():
     servidor = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     servidor.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    
+
     try:
         servidor.bind((HOST, PORTA))
         servidor.listen(2)
         print(f"=== SERVIDOR TETRIS SOCKETS RODANDO NA PORTA {PORTA} ===")
-        print("Aguardando 2 jogadores se conectarem...\n")
 
         while True:
-            # limpa conexões antigas se o servidor reiniciar a sala
+            print("\n[AGUARDANDO] Esperando 2 jogadores se conectarem...")
+
             with lock:
                 clientes.clear()
 
-            # aguarda até ter 2 jogadores conectados
+            # aceita exatamente 2 clientes
             while len(clientes) < 2:
                 conexao, endereco = servidor.accept()
                 with lock:
                     clientes.append(conexao)
                     id_jogador = len(clientes)
                 
-                print(f"Jogador {id_jogador}/2 conectado!")
+                print(f"[CONEXÃO ACCEPTED] Jogador {id_jogador}/2 conectado!")
                 threading.Thread(target=tratar_cliente, args=(conexao, endereco, id_jogador), daemon=True).start()
 
-            print("\n[SALA CHEIA] 2 jogadores conectados. Iniciando a partida!")
+            print("\n[SALA CHEIA] 2 jogadores na sala! Gerando seed sincronizada...")
             
-            # gera a semente inicial para sincronizar as peças
+            # semente única gerada pelo servidor
             seed = random.randint(100000, 999999)
-            mensagem_inicio = f"START:{seed}\n"
-
-            #envia a semente para ambos os clientes
-            with lock:
-                for c in clientes:
-                    try:
-                        c.sendall(mensagem_inicio.encode('utf-8'))
-                    except OSError:
-                        pass
-
+            broadcast(f"START:{seed}")
             print(f"[SEED ENVIADA]: {seed}\n")
 
-            # aguarda enquanto o jogo estiver acontecendo
+            # mantém o loop preso até alguém cair
             while True:
                 with lock:
                     if len(clientes) < 2:
-                        print("[PARTIDA ENCERRADA] Um dos jogadores caiu. Aguardando novos jogadores...\n")
+                        print("[PARTIDA FINALIZADA] Um jogador desconectou.")
                         break
+                threading.Event().wait(1)
 
     except Exception as e:
         print(f"[ERRO SERVIDOR]: {e}")
     finally:
         servidor.close()
-
 
 if __name__ == "__main__":
     iniciar_servidor()
