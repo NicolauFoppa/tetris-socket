@@ -137,10 +137,14 @@ def carregar_fonte(tamanho):
         return pygame.font.Font(None, tamanho + 4)
 
 
+JOGADORES = 2
+MARGEM_X = (LARGURA * JOGADORES - LARGURA) // 2  # onde o menu e a tela do ip ficam, centralizados no quadro
+
 pygame.init()
-janela = pygame.display.set_mode((LARGURA * ESCALA, ALTURA * ESCALA))
+janela = pygame.display.set_mode((LARGURA * JOGADORES * ESCALA, ALTURA * ESCALA))
 pygame.display.set_caption("Tetris")
-tela = pygame.Surface((LARGURA, ALTURA))  # tudo é desenhado aqui, não direto na janela
+tela = pygame.Surface((LARGURA, ALTURA))  # cada tela/tabuleiro é desenhado aqui, não direto na janela
+quadro = pygame.Surface((LARGURA * JOGADORES, ALTURA))  # junta tudo lado a lado antes de ampliar pra janela
 relogio = pygame.time.Clock()
 fonte = carregar_fonte(8)
 pygame.key.set_repeat(400, 40)  # segurar uma tecla faz ela repetir (ex: backspace)
@@ -185,7 +189,7 @@ class CampoTexto:
     def evento(self, evento):
         # retorna o texto quando aperta enter, senão retorna None
         if evento.type == pygame.MOUSEBUTTONDOWN and evento.button == 1:
-            pos = (evento.pos[0] // ESCALA, evento.pos[1] // ESCALA)
+            pos = (evento.pos[0] // ESCALA - MARGEM_X, evento.pos[1] // ESCALA)
             self.ativo = self.rect.collidepoint(pos)  # clicar fora desativa
         elif not self.ativo:
             return None
@@ -377,8 +381,7 @@ efeito_lcd = criar_efeito_lcd()
 def escolher(opcao):
     global estado, rodando, status
     if opcao == "JOGAR":
-        estado = "jogo"
-        iniciar_jogo()
+        estado = "ip"
         campo.ativo = True
         status = "ENTER: CONECTAR"
     elif opcao == "SAIR":
@@ -456,6 +459,7 @@ def atualizar_ip():
     global estado
     if conexao is not None:
         estado = "jogo"
+        iniciar_partida()
 
 
 def desenha_ip():
@@ -480,120 +484,145 @@ def desenha_ip():
 TABULEIRO = pygame.Rect(8, 0, COLUNAS * TAM_BLOCO, LINHAS * TAM_BLOCO)  # área onde as peças caem
 PONTOS_LINHAS = [0, 40, 100, 300, 1200]  # pontos por apagar 1, 2, 3 ou 4 linhas de uma vez
 
-gerador = random.Random()  # sorteia as peças; com a mesma seed os dois jogadores recebem a mesma sequência
-travadas = {}              # (x, y) -> cor dos blocos já fixados
-grade = criar_grade(travadas)
-peca_atual = None
-proxima_peca = None
-pontos = 0
-linhas_feitas = 0
-tempo_jogo = 0.0           # segundos desde o início da partida
-timer_queda = 0.0          # tempo acumulado desde a última vez que a peça desceu
-fim_de_jogo = False
+# teclas de cada jogador
+TECLAS_P1 = {"esq": pygame.K_a, "dir": pygame.K_d, "girar": pygame.K_w,
+             "desce": pygame.K_s, "drop": pygame.K_SPACE}
+TECLAS_P2 = {"esq": pygame.K_LEFT, "dir": pygame.K_RIGHT, "girar": pygame.K_UP,
+             "desce": pygame.K_DOWN, "drop": pygame.K_RETURN}
 
 
-def nova_peca():
-    return Peca(5, 2, gerador.choice(shapes))
+# tudo de um tabuleiro: cada jogador tem o seu
+class Jogo:
+    def __init__(self, nome, teclas):
+        self.nome = nome
+        self.teclas = teclas
+        self.gerador = random.Random()  # sorteia as peças; com a mesma seed os dois recebem a mesma sequência
+        self.iniciar()
+
+    # zera tudo pra começar uma partida
+    def iniciar(self, seed=None):
+        self.gerador.seed(seed)
+        self.travadas = {}           # (x, y) -> cor dos blocos já fixados
+        self.grade = criar_grade(self.travadas)
+        self.peca_atual = self.nova_peca()
+        self.proxima_peca = self.nova_peca()
+        self.pontos = 0
+        self.linhas_feitas = 0
+        self.timer_queda = 0.0       # tempo acumulado desde a última vez que a peça desceu
+        self.fim_de_jogo = False
+
+    def nova_peca(self):
+        return Peca(5, 2, self.gerador.choice(shapes))
+
+    def nivel(self):
+        return self.linhas_feitas // 10
+
+    # segundos entre cada descida automática, fica mais rápido a cada nível
+    def intervalo_queda(self):
+        return max(0.1, 0.8 - self.nivel() * 0.07)
+
+    # tenta mover a peça; se não couber, desfaz e retorna False
+    def mover(self, dx, dy, giro=0):
+        peca = self.peca_atual
+        peca.x += dx
+        peca.y += dy
+        peca.rotation += giro
+        if valid_space(peca, self.grade):
+            return True
+        peca.x -= dx
+        peca.y -= dy
+        peca.rotation -= giro
+        return False
+
+    # fixa a peça no tabuleiro, apaga linhas e puxa a próxima
+    def travar_peca(self):
+        for x, y in convert_shape_format(self.peca_atual):
+            if y < 0:  # travou com pedaço pra fora do topo
+                self.fim_de_jogo = True
+            else:
+                self.travadas[(x, y)] = self.peca_atual.cor
+        self.grade = criar_grade(self.travadas)
+
+        apagadas = limpar_linhas(self.grade, self.travadas)
+        if apagadas:
+            self.pontos += PONTOS_LINHAS[apagadas] * (self.nivel() + 1)
+            self.linhas_feitas += apagadas
+            self.grade = criar_grade(self.travadas)
+
+        self.peca_atual, self.proxima_peca = self.proxima_peca, self.nova_peca()
+        if not valid_space(self.peca_atual, self.grade):  # não tem espaço nem pra nascer
+            self.fim_de_jogo = True
+
+    # trata uma tecla apertada, se ela for desse jogador
+    def tecla(self, tecla):
+        if tecla == self.teclas["esq"]:
+            self.mover(-1, 0)
+        elif tecla == self.teclas["dir"]:
+            self.mover(1, 0)
+        elif tecla == self.teclas["girar"]:
+            self.mover(0, 0, giro=1)
+        elif tecla == self.teclas["desce"]:  # soft drop
+            if not self.mover(0, 1):
+                self.travar_peca()
+            self.timer_queda = 0
+        elif tecla == self.teclas["drop"]:  # hard drop: desce até encostar e já trava
+            while self.mover(0, 1):
+                pass
+            self.travar_peca()
+            self.timer_queda = 0
+
+    def atualizar(self, dt):
+        self.timer_queda += dt
+        if self.timer_queda >= self.intervalo_queda():
+            self.timer_queda = 0
+            if not self.mover(0, 1):
+                self.travar_peca()
 
 
-# zera tudo pra começar uma partida; a seed vai vir do servidor (START:seed)
-def iniciar_jogo(seed=None):
-    global grade, peca_atual, proxima_peca, pontos, linhas_feitas, tempo_jogo, timer_queda, fim_de_jogo
-    gerador.seed(seed)
-    travadas.clear()
-    grade = criar_grade(travadas)
-    peca_atual = nova_peca()
-    proxima_peca = nova_peca()
-    pontos = 0
-    linhas_feitas = 0
+jogos = [Jogo("P1", TECLAS_P1), Jogo("P2", TECLAS_P2)]
+tempo_jogo = 0.0  # segundos desde o início da partida
+
+
+# começa a partida dos dois com a mesma seed (depois ela vai vir do servidor, no START:seed)
+def iniciar_partida(seed=None):
+    global tempo_jogo
+    if seed is None:
+        seed = random.randint(100000, 999999)
+    for jogo in jogos:
+        jogo.iniciar(seed)
     tempo_jogo = 0.0
-    timer_queda = 0.0
-    fim_de_jogo = False
 
 
-def nivel():
-    return linhas_feitas // 10
-
-
-# segundos entre cada descida automática, fica mais rápido a cada nível
-def intervalo_queda():
-    return max(0.1, 0.8 - nivel() * 0.07)
-
-
-# tenta mover a peça; se não couber, desfaz e retorna False
-def mover(dx, dy, giro=0):
-    peca_atual.x += dx
-    peca_atual.y += dy
-    peca_atual.rotation += giro
-    if valid_space(peca_atual, grade):
-        return True
-    peca_atual.x -= dx
-    peca_atual.y -= dy
-    peca_atual.rotation -= giro
-    return False
-
-
-# fixa a peça no tabuleiro, apaga linhas e puxa a próxima
-def travar_peca():
-    global grade, peca_atual, proxima_peca, pontos, linhas_feitas, fim_de_jogo
-    for x, y in convert_shape_format(peca_atual):
-        if y < 0:  # travou com pedaço pra fora do topo
-            fim_de_jogo = True
-        else:
-            travadas[(x, y)] = peca_atual.cor
-    grade = criar_grade(travadas)
-
-    apagadas = limpar_linhas(grade, travadas)
-    if apagadas:
-        pontos += PONTOS_LINHAS[apagadas] * (nivel() + 1)
-        linhas_feitas += apagadas
-        grade = criar_grade(travadas)
-
-    peca_atual, proxima_peca = proxima_peca, nova_peca()
-    if not valid_space(peca_atual, grade):  # não tem espaço nem pra nascer
-        fim_de_jogo = True
+# a partida acaba quando qualquer um dos dois perde
+def partida_acabou():
+    return any(jogo.fim_de_jogo for jogo in jogos)
 
 
 def eventos_jogo(evento):
-    global estado, timer_queda
+    global estado
     if evento.type != pygame.KEYDOWN:
         return
     if evento.key == pygame.K_ESCAPE:
         estado = "menu"
-    elif fim_de_jogo:
-        if evento.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
-            iniciar_jogo()
-    elif evento.key in (pygame.K_LEFT, pygame.K_a):
-        mover(-1, 0)
-    elif evento.key in (pygame.K_RIGHT, pygame.K_d):
-        mover(1, 0)
-    elif evento.key in (pygame.K_UP, pygame.K_w):
-        mover(0, 0, giro=1)
-    elif evento.key in (pygame.K_DOWN, pygame.K_s):  # soft drop
-        if not mover(0, 1):
-            travar_peca()
-        timer_queda = 0
-    elif evento.key == pygame.K_SPACE:  # hard drop: desce até encostar e já trava
-        while mover(0, 1):
-            pass
-        travar_peca()
-        timer_queda = 0
+    elif partida_acabou():
+        if evento.key == pygame.K_r:
+            iniciar_partida()
+    else:
+        for jogo in jogos:
+            jogo.tecla(evento.key)
 
 
 def atualizar_jogo(dt):
-    global tempo_jogo, timer_queda
-    if fim_de_jogo:
+    global tempo_jogo
+    if partida_acabou():
         return
     tempo_jogo += dt
-    timer_queda += dt
-    if timer_queda >= intervalo_queda():
-        timer_queda = 0
-        if not mover(0, 1):
-            travar_peca()
+    for jogo in jogos:
+        jogo.atualizar(dt)
 
 
 # desenha a próxima peça centralizada dentro da caixa
-def desenhar_proxima(rect, tam=6):
+def desenhar_proxima(proxima_peca, rect, tam=6):
     formato = proxima_peca.shape[0]
     blocos = [(j, i) for i, linha in enumerate(formato) for j, c in enumerate(linha) if c == '0']
     min_x = min(j for j, _ in blocos)
@@ -606,7 +635,7 @@ def desenhar_proxima(rect, tam=6):
         desenhar_bloco(x0 + (j - min_x) * tam, y0 + (i - min_y) * tam, proxima_peca.cor, tam)
 
 
-def desenhar_jogo():
+def desenhar_jogo(jogo):
     tela.fill(CLARO)
 
     # paredes e chão de tijolo em volta do tabuleiro
@@ -618,34 +647,35 @@ def desenhar_jogo():
         desenhar_tijolo(x, TABULEIRO.bottom)
 
     # blocos fixados e a peça caindo (só a parte que já entrou no tabuleiro)
-    for (x, y), cor in travadas.items():
+    for (x, y), cor in jogo.travadas.items():
         desenhar_bloco(TABULEIRO.x + x * TAM_BLOCO, TABULEIRO.y + y * TAM_BLOCO, cor)
-    for x, y in convert_shape_format(peca_atual):
+    for x, y in convert_shape_format(jogo.peca_atual):
         if y >= 0:
-            desenhar_bloco(TABULEIRO.x + x * TAM_BLOCO, TABULEIRO.y + y * TAM_BLOCO, peca_atual.cor)
+            desenhar_bloco(TABULEIRO.x + x * TAM_BLOCO, TABULEIRO.y + y * TAM_BLOCO, jogo.peca_atual.cor)
 
     # painel do lado direito
     centro = (TABULEIRO.right + 8 + LARGURA) // 2
     desenhar_moldura(pygame.Rect(97, 4, 62, 26), dupla=False)
     escrever("PONTOS", ESCURO, (centro, 12))
-    escrever(str(pontos), ESCURO, (centro, 22))
+    escrever(str(jogo.pontos), ESCURO, (centro, 22))
     desenhar_moldura(pygame.Rect(97, 36, 62, 44), dupla=False)
     escrever("PROXIMA", ESCURO, (centro, 44))
-    desenhar_proxima(pygame.Rect(97, 50, 62, 28))
+    desenhar_proxima(jogo.proxima_peca, pygame.Rect(97, 50, 62, 28))
     desenhar_moldura(pygame.Rect(97, 86, 62, 26), dupla=False)
     escrever("TEMPO", ESCURO, (centro, 94))
     minutos, segundos = divmod(int(tempo_jogo), 60)
     escrever(f"{minutos}:{segundos:02}", ESCURO, (centro, 104))
-    escrever(f"NIVEL {nivel() + 1}", ESCURO, (centro, 124))
-    escrever("ESC", ESCURO, (centro, 146))
-    escrever("MENU", ESCURO, (centro, 156))
+    escrever(f"NIVEL {jogo.nivel() + 1}", ESCURO, (centro, 120))
+    escrever(jogo.nome, ESCURO, (centro, 134))
+    escrever("ESC", ESCURO, (centro, 148))
+    escrever("MENU", ESCURO, (centro, 158))
 
-    if fim_de_jogo:
+    # quem perdeu mostra PERDEU, o outro VENCEU
+    if partida_acabou():
         desenhar_moldura(pygame.Rect(TABULEIRO.x + 4, 56, TABULEIRO.width - 8, 48))
-        escrever("FIM DE", ESCURO, (TABULEIRO.centerx, 68))
-        escrever("JOGO", ESCURO, (TABULEIRO.centerx, 78))
+        escrever("PERDEU" if jogo.fim_de_jogo else "VENCEU", ESCURO, (TABULEIRO.centerx, 72))
         if int(tempo * 2) % 2 == 0:
-            escrever("ENTER", MEDIO, (TABULEIRO.centerx, 92))
+            escrever("TECLA R", MEDIO, (TABULEIRO.centerx, 90))
 
 
 # loop principal: a cada frame trata os eventos, atualiza e desenha a tela atual
@@ -664,17 +694,23 @@ while rodando:
         elif estado == "jogo":
             eventos_jogo(evento)
 
+    # menu e ip ficam no meio do quadro; no jogo, cada tabuleiro ocupa uma metade
+    quadro.fill(FUNDO)
     if estado == "menu":
         desenhar_menu()
+        quadro.blit(tela, (MARGEM_X, 0))
     elif estado == "ip":
         atualizar_ip()
         desenha_ip()
+        quadro.blit(tela, (MARGEM_X, 0))
     elif estado == "jogo":
         atualizar_jogo(dt)
-        desenhar_jogo()
+        for i, jogo in enumerate(jogos):
+            desenhar_jogo(jogo)
+            quadro.blit(tela, (i * LARGURA, 0))
 
-    # amplia a tela pequena pra janela sem suavizar, por isso fica pixelado
-    pygame.transform.scale(tela, janela.get_size(), janela)
+    # amplia o quadro pequeno pra janela sem suavizar, por isso fica pixelado
+    pygame.transform.scale(quadro, janela.get_size(), janela)
     if EFEITO_LCD:
         janela.blit(efeito_lcd, (0, 0))
     pygame.display.flip()
